@@ -1,0 +1,12 @@
+{
+  "raw_description": "handled utensil container",
+  "seen": [
+    "opaque cylindrical handled container",
+    "large mug-like utensil holder",
+    "deep container with side handle"
+  ],
+  "unseen": [
+    "handled cylindrical cup",
+    "robot-graspable utensil holder"
+  ]
+}

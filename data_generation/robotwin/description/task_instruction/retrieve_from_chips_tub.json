@@ -1,0 +1,19 @@
+{
+  "full_description": "hold a chips tub with the left arm, retrieve one object with the right arm, and place it on the table",
+  "schema": "{A} identifies the retrieved object, {B} identifies the chips tub, {a} is the left arm, and {b} is the right arm",
+  "preference": "num of words should not exceed 20. Degree of detail avg is 6.",
+  "seen": [
+    "Hold {B} with {a}, retrieve {A} with {b}, and place {A} on the table.",
+    "Use the left arm {a} to hold {B} while the right arm {b} removes {A}.",
+    "Take {A} out of {B} with {b} while {a} keeps the tub steady.",
+    "Keep {B} in the left arm and place the retrieved {A} with the right arm.",
+    "The left arm holds {B}; the right arm retrieves {A} and sets it down.",
+    "Remove {A} from the chips tub {B} using {b}, then place it on the table."
+  ],
+  "unseen": [
+    "Hold {B} steady with {a} and take {A} out using {b}.",
+    "Retrieve {A} from {B} with the right arm and place it down.",
+    "Use separate arms to hold {B} and remove {A}.",
+    "Keep the tub {B} stable while the other arm extracts {A}."
+  ]
+}
