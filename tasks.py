@@ -35,4 +35,13 @@ TASKS = {
         wrist_cams=[],
         tactile=False,
     ),
+    "robotwin": dict(
+        datasets=["robotwin"],
+        grid=(64, 48, 64),
+        x_range=(-0.5, 0.5),
+        y_range=(-0.35, 0.35),
+        z_range=(-0.1, 0.4),
+        wrist_cams=[1, 2],
+        tactile=False,
+    ),
 }
