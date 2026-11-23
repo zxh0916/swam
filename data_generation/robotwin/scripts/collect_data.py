@@ -10,6 +10,7 @@ from envs import *
 import yaml
 import importlib
 import json
+import fcntl
 import re
 import traceback
 import os
@@ -75,7 +76,7 @@ def get_embodiment_config(robot_file):
     return embodiment_args
 
 
-def main(task_name=None, task_config=None):
+def main(task_name=None, task_config=None, seed_only=False, data_only=False, episode_start=None, episode_end=None):
 
     task = class_decorator(task_name)
     config_path = os.path.join(CONFIGS_PATH, f"{task_config}.yml")
@@ -147,6 +148,11 @@ def main(task_name=None, task_config=None):
         str(args["task_name"]),
         embodiment_dir,
     )
+    if data_only:
+        args["use_seed"] = True
+    args["seed_only"] = bool(seed_only)
+    args["episode_start"] = episode_start
+    args["episode_end"] = episode_end
     run(task, args)
 
 
@@ -234,6 +240,10 @@ def run(TASK_ENV, args):
             seed_list = file.read().split()
             seed_list = [int(i) for i in seed_list]
 
+    if args.get("seed_only"):
+        print("Seed collection only; skipping data collection.")
+        return
+
     # =========== Collect Data ===========
 
     if args["collect_data"]:
@@ -256,7 +266,12 @@ def run(TASK_ENV, args):
         while exist_hdf5(st_idx):
             st_idx += 1
 
-        for episode_idx in range(st_idx, args["episode_num"]):
+        start = st_idx if args.get("episode_start") is None else max(st_idx, int(args["episode_start"]))
+        end = args["episode_num"] if args.get("episode_end") is None else min(args["episode_num"], int(args["episode_end"]))
+
+        for episode_idx in range(start, end):
+            if exist_hdf5(episode_idx):
+                continue
             print(f"\033[34mTask name: {args['task_name']}\033[0m")
 
             TASK_ENV.setup_demo(now_ep_num=episode_idx, seed=seed_list[episode_idx], **args)
@@ -268,18 +283,23 @@ def run(TASK_ENV, args):
 
             info_file_path = os.path.join(args["save_path"], "scene_info.json")
 
-            if not os.path.exists(info_file_path):
-                with open(info_file_path, "w", encoding="utf-8") as file:
-                    json.dump({}, file, ensure_ascii=False)
-
-            with open(info_file_path, "r", encoding="utf-8") as file:
-                info_db = json.load(file)
-
             info = TASK_ENV.play_once()
-            info_db[f"episode_{episode_idx}"] = info
 
-            with open(info_file_path, "w", encoding="utf-8") as file:
-                json.dump(info_db, file, ensure_ascii=False, indent=4)
+            # Several data workers may share scene_info.json: serialize the
+            # read-modify-write so the JSON is never truncated mid-write.
+            with open(info_file_path + ".lock", "w") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                if not os.path.exists(info_file_path):
+                    with open(info_file_path, "w", encoding="utf-8") as file:
+                        json.dump({}, file, ensure_ascii=False)
+                with open(info_file_path, "r", encoding="utf-8") as file:
+                    info_db = json.load(file)
+
+                info_db[f"episode_{episode_idx}"] = info
+
+                with open(info_file_path, "w", encoding="utf-8") as file:
+                    json.dump(info_db, file, ensure_ascii=False, indent=4)
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
             episode_descriptions = build_episode_instructions(
                 args, info, episode_idx, seed_list[episode_idx]
@@ -302,8 +322,19 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("task_name", type=str)
     parser.add_argument("task_config", type=str)
+    parser.add_argument("--seed-only", action="store_true", help="collect seeds then exit")
+    parser.add_argument("--data-only", action="store_true", help="skip the seed search, use seed.txt")
+    parser.add_argument("--episode-start", type=int, default=None)
+    parser.add_argument("--episode-end", type=int, default=None)
     parser = parser.parse_args()
     task_name = parser.task_name
     task_config = parser.task_config
 
-    main(task_name=task_name, task_config=task_config)
+    main(
+        task_name=task_name,
+        task_config=task_config,
+        seed_only=parser.seed_only,
+        data_only=parser.data_only,
+        episode_start=parser.episode_start,
+        episode_end=parser.episode_end,
+    )

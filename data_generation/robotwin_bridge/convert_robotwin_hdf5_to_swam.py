@@ -78,6 +78,9 @@ def convert_episode(src: Path, dst: Path, episode_id: int, origin: np.ndarray, b
             bbox=bbox.astype(np.float32),
             depth_unit="metre",
             source_depth_unit="millimetre",
+            # The bank init reads full-scene depth; native RoboTwin depth is
+            # the whole SAPIEN scene with 0 = hole.
+            depth_semantics="full_scene_lrc",
         )
         img = out.create_group("img")
         cam = out.create_group("cam")
@@ -141,6 +144,7 @@ def main() -> None:
     p.add_argument("inputs", nargs="+", type=Path, help="native RoboTwin episode HDF5 files")
     p.add_argument("--output", type=Path, required=True, help="SWAM dataset root")
     p.add_argument("--val-count", type=int, default=1)
+    p.add_argument("--episode-offset", type=int, default=0, help="first episode id of these inputs, for chunked parallel conversion")
     p.add_argument("--origin", nargs=3, type=float, default=[0.0, 0.0, 0.74], metavar=("X", "Y", "Z"))
     p.add_argument("--bbox", nargs=6, type=float, default=[-0.5, 0.5, -0.35, 0.35, -0.1, 0.4], metavar=("XMIN", "XMAX", "YMIN", "YMAX", "ZMIN", "ZMAX"))
     a = p.parse_args()
@@ -157,8 +161,9 @@ def main() -> None:
     val_count = min(max(a.val_count, 0), len(files))
     split = [(val if i >= len(files) - val_count else train) for i in range(len(files))]
     for i, (src, part) in enumerate(zip(files, split)):
-        dst = part / f"episode_{i}.hdf5"
-        convert_episode(src, dst, i, origin, bbox)
+        episode_id = a.episode_offset + i
+        dst = part / f"episode_{episode_id}.hdf5"
+        convert_episode(src, dst, episode_id, origin, bbox)
         print(dst)
 
 

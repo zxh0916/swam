@@ -624,14 +624,18 @@ class Base_Task(gym.Env):
         # print('Merging pkl to hdf5: ', cache_path, ' -> ', target_file_path)
 
         os.makedirs(f"{self.save_dir}/data", exist_ok=True)
+        # Write to a temporary name and rename at the end: a worker killed
+        # mid-merge then leaves only a .tmp file, which exist_hdf5 ignores.
+        tmp_file_path = f"{target_file_path}.tmp"
         process_folder_to_hdf5_video(
             cache_path,
-            target_file_path,
+            tmp_file_path,
             target_video_path,
             instructions=instructions,
             frequency=int(self.save_freq or 15),
             rgb_debug=self.rgb_debug,
         )
+        os.replace(tmp_file_path, target_file_path)
 
     def remove_data_cache(self):
         folder_path = self.folder_path["cache"]
