@@ -34,6 +34,16 @@ def jpeg_from_rgb(rgb: np.ndarray) -> np.ndarray:
     return np.frombuffer(buf.tobytes(), dtype=np.uint8)
 
 
+def quat_to_rotvec(q: np.ndarray) -> np.ndarray:
+    q = np.asarray(q, dtype=np.float32)
+    q = q / np.maximum(np.linalg.norm(q, axis=-1, keepdims=True), 1e-8)
+    w = np.clip(q[..., 0], -1.0, 1.0)
+    xyz = q[..., 1:]
+    angle = 2.0 * np.arccos(w)
+    scale = angle / np.maximum(np.linalg.norm(xyz, axis=-1), 1e-8)
+    return xyz * scale[..., None]
+
+
 def decode_native(bit: np.ndarray) -> np.ndarray:
     if isinstance(bit, (bytes, bytearray)):
         encoded = np.frombuffer(bit, dtype=np.uint8)
@@ -72,6 +82,18 @@ def convert_episode(src: Path, dst: Path, episode_id: int, origin: np.ndarray, b
         img = out.create_group("img")
         cam = out.create_group("cam")
         render = out.create_group("render")
+        action_group = out.create_group("action")
+        left_pose = np.asarray(inp["action/left_ee_poses"], dtype=np.float32)
+        right_pose = np.asarray(inp["action/right_ee_poses"], dtype=np.float32)
+        left_grip = np.asarray(inp["action/left_ee_joint_states"], dtype=np.float32).reshape(-1, 1)
+        right_grip = np.asarray(inp["action/right_ee_joint_states"], dtype=np.float32).reshape(-1, 1)
+        action_group.create_dataset(
+            "cartesian_action",
+            data=np.concatenate(
+                [left_pose[:, :3], quat_to_rotvec(left_pose[:, 3:]), left_grip,
+                 right_pose[:, :3], quat_to_rotvec(right_pose[:, 3:]), right_grip], axis=1
+            ).astype(np.float32),
+        )
         for cid, cname in enumerate(CAMERAS):
             src_cam = inp[f"vision/{cname}"]
             rgb = [decode_native(src_cam["colors"][t]) for t in range(T)]
@@ -82,6 +104,20 @@ def convert_episode(src: Path, dst: Path, episode_id: int, origin: np.ndarray, b
             E = np.matmul(E_gl, GL_TO_SWAM)
             E[:, :3, 3] -= origin[None]
             V = np.linalg.inv(E).astype(np.float32)
+
+            # SWAM's valid mask controls which depth pixels become training
+            # points. Keep only points inside the configured world workspace.
+            yy, xx = np.indices((H, W), dtype=np.float32)
+            z = depth
+            x = (xx[None] - K[:, None, None, 0, 2]) * z / K[:, None, None, 0, 0]
+            y = (yy[None] - K[:, None, None, 1, 2]) * z / K[:, None, None, 1, 1]
+            cam_points = np.stack([x, y, z], axis=-1)
+            world_points = np.einsum("thwc,tdc->thwd", cam_points, E[:, :3, :3]) + E[:, None, None, :3, 3]
+            valid &= np.all(
+                (world_points >= bbox[[0, 2, 4]]) &
+                (world_points <= bbox[[1, 3, 5]]),
+                axis=-1,
+            )
 
             ig = img.create_group(f"camera_{cid}")
             ig.create_dataset("depth", data=depth.astype(np.float16), compression="gzip")
@@ -106,7 +142,7 @@ def main() -> None:
     p.add_argument("--output", type=Path, required=True, help="SWAM dataset root")
     p.add_argument("--val-count", type=int, default=1)
     p.add_argument("--origin", nargs=3, type=float, default=[0.0, 0.0, 0.74], metavar=("X", "Y", "Z"))
-    p.add_argument("--bbox", nargs=6, type=float, default=[-0.65, 0.65, -0.45, 0.45, -0.15, 0.85], metavar=("XMIN", "XMAX", "YMIN", "YMAX", "ZMIN", "ZMAX"))
+    p.add_argument("--bbox", nargs=6, type=float, default=[-0.5, 0.5, -0.35, 0.35, -0.1, 0.4], metavar=("XMIN", "XMAX", "YMIN", "YMAX", "ZMIN", "ZMAX"))
     a = p.parse_args()
     files = sorted(Path(x).resolve() for x in a.inputs)
     if not files:
