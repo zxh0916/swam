@@ -185,6 +185,7 @@ def pkl_files_to_hdf5_and_video(
     instructions=None,
     frequency=15,
     rgb_debug=False,
+    collision_debug=False,
 ):
     data_list = parse_dict_structure(load_pkl_file(pkl_files[0]))
     for pkl_file_path in pkl_files:
@@ -195,7 +196,26 @@ def pkl_files_to_hdf5_and_video(
     if rgb_debug:
         debug_path = str(Path(video_path).with_name(Path(video_path).stem + "_rgb_debug.mp4"))
         write_rgb_debug_video(data_list, debug_path, frequency)
+    if collision_debug:
+        debug_path = str(Path(video_path).with_name(Path(video_path).stem + "_collision_debug.mp4"))
+        write_collision_debug_video(data_list, debug_path)
     return create_xpolicylab_hdf5(data_list, hdf5_path, instructions, frequency)
+
+
+def write_collision_debug_video(data, output_path):
+    camera = data["observation"]["head_camera"]
+    rgb = np.asarray(camera["rgb"], dtype=np.uint8)
+    collision = np.asarray(camera["collision_rgb"], dtype=np.uint8)
+    if rgb.shape != collision.shape:
+        raise ValueError("RGB and collision debug frame shapes differ")
+    comparison = np.concatenate([rgb, collision], axis=2)
+    width = rgb.shape[2]
+    comparison[:, :24, :width] = (20, 20, 20)
+    comparison[:, :24, width:] = (20, 20, 20)
+    for frame in comparison:
+        cv2.putText(frame, "RGB", (8, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 1, cv2.LINE_AA)
+        cv2.putText(frame, "COLLISION MESH", (width + 8, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 1, cv2.LINE_AA)
+    images_to_video(comparison, out_path=output_path)
 
 
 def write_rgb_debug_video(data, output_path, frequency):
@@ -236,6 +256,7 @@ def process_folder_to_hdf5_video(
     instructions=None,
     frequency=15,
     rgb_debug=False,
+    collision_debug=False,
 ):
     pkl_files = []
     for fname in os.listdir(folder_path):
@@ -262,4 +283,5 @@ def process_folder_to_hdf5_video(
         instructions=instructions,
         frequency=frequency,
         rgb_debug=rgb_debug,
+        collision_debug=collision_debug,
     )

@@ -68,6 +68,8 @@ class Base_Task(gym.Env):
         self.data_type = kwags.get("data_type", None)
         self.save_data = kwags.get("save_data", False)
         self.rgb_debug = kwags.get("rgb_debug", False)
+        self.collision_debug = kwags.get("collision_debug", False)
+        self._collision_debug_bodies = None
         self.dual_arm = kwags.get("dual_arm", True)
         self.eval_mode = kwags.get("eval_mode", False)
 
@@ -507,6 +509,93 @@ class Base_Task(gym.Env):
         rgb = self.cameras.get_rgb()
         save_img(save_path, rgb[camera_name]['rgb'])
 
+    def _build_collision_debug_scene(self):
+        self._collision_debug_original_bodies = []
+        self._collision_debug_bodies = []
+        palette = [
+            [0.10, 0.65, 0.95, 1.0],
+            [0.95, 0.45, 0.10, 1.0],
+            [0.35, 0.85, 0.35, 1.0],
+            [0.80, 0.35, 0.85, 1.0],
+            [0.95, 0.80, 0.15, 1.0],
+            [0.15, 0.85, 0.75, 1.0],
+        ]
+        for entity in self.scene.entities:
+            components = list(entity.components)
+            self._collision_debug_original_bodies.extend(
+                component for component in components
+                if isinstance(component, sapien.render.RenderBodyComponent)
+            )
+            if entity.name in {"ground", "wall"}:
+                continue
+
+            material = sapien.render.RenderMaterial(base_color=palette[entity.per_scene_id % len(palette)])
+            material.roughness = 0.7
+            debug_body = None
+            for component in components:
+                if not isinstance(component, (
+                    sapien.physx.PhysxRigidBodyComponent,
+                    sapien.physx.PhysxRigidStaticComponent,
+                )):
+                    continue
+                for shape in component.collision_shapes:
+                    if isinstance(shape, sapien.physx.PhysxCollisionShapeBox):
+                        render_shape = sapien.render.RenderShapeBox(shape.half_size, material)
+                    elif isinstance(shape, sapien.physx.PhysxCollisionShapeSphere):
+                        render_shape = sapien.render.RenderShapeSphere(shape.radius, material)
+                    elif isinstance(shape, sapien.physx.PhysxCollisionShapeCapsule):
+                        render_shape = sapien.render.RenderShapeCapsule(shape.radius, shape.half_length, material)
+                    elif isinstance(shape, sapien.physx.PhysxCollisionShapeCylinder):
+                        render_shape = sapien.render.RenderShapeCylinder(shape.radius, shape.half_length, material)
+                    elif isinstance(shape, (
+                        sapien.physx.PhysxCollisionShapeConvexMesh,
+                        sapien.physx.PhysxCollisionShapeTriangleMesh,
+                    )):
+                        vertices = np.asarray(shape.vertices, dtype=np.float32) * np.asarray(shape.scale, dtype=np.float32)
+                        triangles = np.asarray(shape.triangles, dtype=np.uint32).reshape(-1, 3)
+                        mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, process=False)
+                        render_shape = sapien.render.RenderShapeTriangleMesh(
+                            vertices,
+                            triangles,
+                            np.asarray(mesh.vertex_normals, dtype=np.float32),
+                            np.zeros((len(vertices), 2), dtype=np.float32),
+                            material,
+                        )
+                    else:
+                        continue
+                    render_shape.set_local_pose(shape.local_pose)
+                    if debug_body is None:
+                        debug_body = sapien.render.RenderBodyComponent()
+                    debug_body.attach(render_shape)
+
+            if debug_body is not None:
+                debug_body.visibility = 0.0
+                debug_body.disable_render_id()
+                entity.add_component(debug_body)
+                self._collision_debug_bodies.append(debug_body)
+
+    def _capture_collision_debug(self):
+        if self._collision_debug_bodies is None:
+            self._build_collision_debug_scene()
+        original_visibility = [body.visibility for body in self._collision_debug_original_bodies]
+        try:
+            for body in self._collision_debug_original_bodies:
+                body.visibility = 0.0
+            for body in self._collision_debug_bodies:
+                body.visibility = 1.0
+            self.scene.update_render()
+            camera_id = self.cameras.static_camera_name.index("head_camera")
+            camera = self.cameras.static_camera_list[camera_id]
+            camera.take_picture()
+            rgba = camera.get_picture("Color")
+            return (rgba[:, :, :3] * 255).clip(0, 255).astype(np.uint8)
+        finally:
+            for body, visibility in zip(self._collision_debug_original_bodies, original_visibility):
+                body.visibility = visibility
+            for body in self._collision_debug_bodies:
+                body.visibility = 0.0
+            self.scene.update_render()
+
     def _take_picture(self):  # save data
         if not self.save_data:
             return
@@ -523,6 +612,8 @@ class Base_Task(gym.Env):
                         os.remove(directory + file)
 
         pkl_dic = self.get_obs()
+        if self.collision_debug:
+            pkl_dic["observation"]["head_camera"]["collision_rgb"] = self._capture_collision_debug()
         save_pkl(self.folder_path["cache"] + f"{self.FRAME_IDX}.pkl", pkl_dic)  # use cache
         self.FRAME_IDX += 1
 
@@ -634,6 +725,7 @@ class Base_Task(gym.Env):
             instructions=instructions,
             frequency=int(self.save_freq or 15),
             rgb_debug=self.rgb_debug,
+            collision_debug=self.collision_debug,
         )
         os.replace(tmp_file_path, target_file_path)
 

@@ -35,3 +35,4 @@ clear_cache_freq: 5
 collect_data: true
 eval_video_log: true
 rgb_debug: true
+collision_debug: false

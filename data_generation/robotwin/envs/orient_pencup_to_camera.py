@@ -99,8 +99,8 @@ class orient_pencup_to_camera(Base_Task):
         contact_position = self.markpen.get_contact_point(0, "pose").p
         rotation = t3d.quaternions.quat2mat(GRASP_DIRECTION_DIC["front_left"])
         quat = t3d.quaternions.mat2quat(rotation)
-        pre_position = contact_position + rotation @ np.array([-0.18, 0.0, 0.0])
-        grasp_position = contact_position + rotation @ np.array([-0.12, 0.0, 0.0])
+        pre_position = contact_position + rotation @ np.array([-0.20, 0.0, 0.0])
+        grasp_position = contact_position + rotation @ np.array([-0.14, 0.0, 0.0])
         return arm_tag, [
             Action(arm_tag, "move", target_pose=pre_position.tolist() + quat.tolist()),
             Action(
@@ -113,13 +113,13 @@ class orient_pencup_to_camera(Base_Task):
         ]
 
     def _right_marker_contact(self):
-        gripper_names = set(self.robot.right_fix_gripper_name)
-        gripper_names.update(link.child_link.get_name() for link, *_ in self.robot.right_gripper)
+        finger_names = {link.child_link.get_name() for link, *_ in self.robot.right_gripper}
+        contacted_fingers = set()
         for contact in self.scene.get_contacts():
             names = {contact.bodies[0].entity.name, contact.bodies[1].entity.name}
-            if self.markpen.get_name() in names and names.intersection(gripper_names):
-                return True
-        return False
+            if self.markpen.get_name() in names:
+                contacted_fingers.update(names.intersection(finger_names))
+        return finger_names.issubset(contacted_fingers)
 
     def _attach_marker(self):
         link = self.robot.right_gripper[0][0].child_link
@@ -139,6 +139,45 @@ class orient_pencup_to_camera(Base_Task):
         self.marker_grasp_drive.set_drive_property_swing(1000.0, 100.0, 1000.0)
         self.marker_grasp_drive.set_drive_property_twist(1000.0, 100.0, 1000.0)
 
+    def _marker_vertices_world(self):
+        vertices = []
+        marker_pose = self.markpen.get_pose()
+        for component in self.markpen.actor.components:
+            if not isinstance(component, sapien.physx.PhysxRigidBodyComponent):
+                continue
+            for shape in component.collision_shapes:
+                if not isinstance(shape, sapien.physx.PhysxCollisionShapeConvexMesh):
+                    continue
+                local_vertices = np.asarray(shape.vertices) * np.asarray(shape.scale)
+                transform = (marker_pose * shape.local_pose).to_transformation_matrix()
+                vertices.append(local_vertices @ transform[:3, :3].T + transform[:3, 3])
+        return np.concatenate(vertices)
+
+    def _lift_marker_out(self, arm_tag):
+        mouth_position, mouth_axis = self._mouth_state()
+        mouth_axis = mouth_axis / np.linalg.norm(mouth_axis)
+        vertices = self._marker_vertices_world()
+        lowest_axial = np.min((vertices - mouth_position) @ mouth_axis)
+        lift_distance = max(0.0, -lowest_axial) + 0.05
+        target_pose = np.array(self.robot.get_right_ee_pose())
+        target_pose[:3] += mouth_axis * lift_distance
+        return self.move_to_pose(arm_tag, target_pose)
+
+    def _marker_table_actions(self, arm_tag):
+        gripper_pose = np.array(self.robot.get_right_ee_pose())
+        lowest_z_offset = self._marker_vertices_world()[:, 2].min() - gripper_pose[2]
+        place_z = 0.74 + self.table_z_bias + 0.008 - lowest_z_offset
+        self.marker_place_xy = np.array([0.26, -0.12])
+
+        above_pose = gripper_pose.copy()
+        above_pose[:3] = [*self.marker_place_xy, max(gripper_pose[2], place_z + 0.10)]
+        place_pose = gripper_pose.copy()
+        place_pose[:3] = [*self.marker_place_xy, place_z]
+        return arm_tag, [
+            Action(arm_tag, "move", target_pose=above_pose),
+            Action(arm_tag, "move", target_pose=place_pose),
+        ]
+
     def play_once(self):
         arm_tag = ArmTag("left")
         self.move(self.grasp_actor(self.pencup, arm_tag=arm_tag, pre_grasp_dis=0.08, contact_point_id=0))
@@ -152,24 +191,37 @@ class orient_pencup_to_camera(Base_Task):
             return self.info
 
         contact_streak = 0
+        for _ in range(100):
+            self.scene.step()
+            if self.save_freq is not None:
+                self._update_render()
+                self._take_picture()
+            if self.is_right_gripper_close() and self._right_marker_contact():
+                contact_streak += 1
+                if contact_streak >= 20:
+                    break
+            else:
+                contact_streak = 0
+        if contact_streak < 20:
+            self.plan_success = False
+            return self.info
+
+        self._attach_marker()
+        self.move(self._lift_marker_out(right_arm_tag))
+        if not self.plan_success:
+            return self.info
+        self.move(self._marker_table_actions(right_arm_tag))
+        if not self.plan_success:
+            return self.info
+
+        self.marker_grasp_drive.disable()
+        self.move(self.open_gripper(right_arm_tag))
         for _ in range(80):
             self.scene.step()
             if self.save_freq is not None:
                 self._update_render()
                 self._take_picture()
-            if self._right_marker_contact():
-                contact_streak += 1
-                if contact_streak >= 8:
-                    break
-            else:
-                contact_streak = 0
-        if contact_streak < 8:
-            self.plan_success = False
-            return self.info
-
-        self._attach_marker()
-        self.move(self.move_by_displacement(arm_tag=right_arm_tag, z=0.15, move_axis="arm"))
-        self.move(self.move_by_displacement(arm_tag=right_arm_tag, z=0.08))
+        self.move(self.move_by_displacement(arm_tag=right_arm_tag, z=0.12))
 
         self.info["info"] = {
             "{A}": f"059_pencup_empty/base{self.pencup_id}",
@@ -182,13 +234,16 @@ class orient_pencup_to_camera(Base_Task):
     def check_success(self):
         mouth_position, _ = self._mouth_state()
         contact = self.get_gripper_actor_contact_position(self.pencup.get_name())
-        marker_contact = self.get_gripper_actor_contact_position(self.markpen.get_name())
+        marker_bottom = self._marker_vertices_world()[:, 2].min()
+        marker_center = self._marker_center()
         return bool(
             mouth_position[2] > 0.90 + self.table_z_bias
             and self.is_left_gripper_close()
             and len(contact) > 0
-            and self.is_right_gripper_close()
-            and len(marker_contact) > 0
+            and self.is_right_gripper_open()
+            and not self.marker_grasp_drive.is_enabled
             and not self._marker_in_cup()
-            and self._marker_center()[2] > mouth_position[2] + 0.04
+            and abs(marker_bottom - (0.74 + self.table_z_bias)) < 0.02
+            and abs(marker_center[0]) < 0.55
+            and abs(marker_center[1]) < 0.30
         )
